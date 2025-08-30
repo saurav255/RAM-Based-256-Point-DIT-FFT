@@ -1,0 +1,362 @@
+/*
+ * vdma_hdmi_csc.c
+ *
+ * This code is a simplified version for displaying a static color bar
+ * pattern on an HDMI monitor using the AXI VDMA. It is intended for a
+ * Vivado design that uses an AXI VDMA -> Color Space Converter -> AXI4-Stream
+ * to Video Out pipeline.
+ *
+ * - All image processing and secondary DMA logic has been removed.
+ * - HDMI configuration is done using standard XIic drivers.
+ * - A simple Red, Green, Blue stripe pattern is generated in the frame buffer.
+ */
+
+#include "xparameters.h"
+#include "xaxivdma.h"
+#include "xscugic.h"
+#include "xiic.h"
+#include "xil_printf.h"
+#include "xil_cache.h"
+#include "sleep.h"
+
+/************************** Constant Definitions *****************************/
+
+// --- VDMA and Interrupt Controller Device IDs from xparameters.h ---
+// Note: Your VDMA might be named differently in the block design.
+// Check xparameters.h for the correct device ID.
+#define VDMA_ID         XPAR_VIDEOSUBSYSTEM_AXI_VDMA_0_DEVICE_ID
+#define INTC_ID         XPAR_PS7_SCUGIC_0_DEVICE_ID
+#define VDMA_MM2S_INTR_ID XPAR_FABRIC_VIDEOSUBSYSTEM_AXI_VDMA_0_MM2S_INTROUT_INTR
+
+// --- IIC Device ID and HDMI Chip Address ---
+// This is for configuring the ADV7511 HDMI transmitter on the ZedBoard.
+#define IIC_ID          XPAR_VIDEOSUBSYSTEM_AXI_IIC_0_DEVICE_ID
+#define IIC_ADV7511_ADDR 0x39
+
+// --- Video Resolution ---
+#define H_ACTIVE      1920
+#define V_ACTIVE      1080
+
+// --- Frame Buffer Configuration ---
+// We are using RGB888 format, so 3 bytes per pixel.
+#define FRAME_STRIDE  (H_ACTIVE * 3)
+#define FRAME_SIZE    (FRAME_STRIDE * V_ACTIVE)
+
+/************************** Global Variables *********************************/
+
+// Driver Instances
+static XAxiVdma Vdma;
+static XScuGic  Intc;
+static XIic     Iic;
+
+// The frame buffer is stored in DDR memory.
+// The __attribute__ directive ensures it's aligned to a 64-byte boundary,
+// which can improve DMA performance.
+unsigned char FrameBuffer[FRAME_SIZE] __attribute__ ((aligned (64)));
+
+/************************** Function Prototypes ******************************/
+
+// Interrupt System Setup
+static int SetupIntrController(XScuGic *IntcInstancePtr);
+static int SetupVideoIntrSystem(XAxiVdma *AxiVdmaPtr, u16 ReadIntrId, XScuGic *Intc);
+
+// VDMA Setup
+static int SetupVdma(u16 DeviceId);
+
+// HDMI Setup
+static int  SetupHdmi(u16 IicDeviceId);
+static void ConfigureHdmi(void);
+
+// Frame Buffer Generation
+void FillFrameBuffer(void);
+
+// VDMA Interrupt Callbacks
+static void ReadCallBack(void *CallbackRef, u32 Mask);
+static void ReadErrorCallBack(void *CallbackRef, u32 Mask);
+
+/*****************************************************************************/
+/**
+*
+* Main function
+*
+******************************************************************************/
+int main() {
+    int Status;
+
+    xil_printf("--- ZedBoard HDMI Display Test (VDMA + CSC) ---\r\n");
+
+    // 1. Initialize the Interrupt Controller
+    Status = SetupIntrController(&Intc);
+    if (Status != XST_SUCCESS) {
+        xil_printf("Interrupt Controller Initialization failed! Error: %d\r\n", Status);
+        return XST_FAILURE;
+    }
+    xil_printf("Interrupt Controller Initialized Successfully\r\n");
+
+    // 2. Initialize the HDMI Output (configures the ADV7511 chip via IIC)
+    Status = SetupHdmi(IIC_ID);
+    if (Status != XST_SUCCESS) {
+        xil_printf("HDMI Initialization failed! Error: %d\r\n", Status);
+        return XST_FAILURE;
+    }
+    xil_printf("HDMI Initialized Successfully\r\n");
+
+    // 3. Fill the frame buffer with the color bar test pattern
+    FillFrameBuffer();
+    xil_printf("Frame Buffer filled with test pattern\r\n");
+
+    // 4. Initialize the VDMA
+    Status = SetupVdma(VDMA_ID);
+    if (Status != XST_SUCCESS) {
+        xil_printf("VDMA Initialization failed! Error: %d\r\n", Status);
+        return XST_FAILURE;
+    }
+    xil_printf("VDMA Initialized Successfully\r\n");
+
+    // 5. Setup VDMA interrupts
+    Status = SetupVideoIntrSystem(&Vdma, VDMA_MM2S_INTR_ID, &Intc);
+    if (Status != XST_SUCCESS) {
+        xil_printf("VDMA Interrupt system setup failed! Error: %d\r\n", Status);
+        return XST_FAILURE;
+    }
+    xil_printf("VDMA Interrupt System Setup Successfully\r\n");
+
+    // 6. Start the VDMA transfer to the video pipeline
+    Status = XAxiVdma_DmaStart(&Vdma, XAXIVDMA_READ);
+    if (Status != XST_SUCCESS) {
+        xil_printf("VDMA start failed! Error: %d\r\n", Status);
+        return XST_FAILURE;
+    }
+    xil_printf("VDMA Started. Video output should be visible on HDMI monitor.\r\n");
+
+    // The VDMA runs continuously in the background, so we just loop forever.
+    while (1) {
+    }
+
+    return XST_SUCCESS;
+}
+
+/*****************************************************************************/
+/**
+* This function fills the frame buffer with a 3-bar color pattern.
+* The screen is divided into three vertical bars: Red, Green, and Blue.
+******************************************************************************/
+void FillFrameBuffer(void) {
+    u32 v, h;
+    u8 *FramePtr = FrameBuffer;
+
+    for (v = 0; v < V_ACTIVE; v++) {
+        for (h = 0; h < H_ACTIVE; h++) {
+            if (h < H_ACTIVE / 3) {
+                // Red bar
+                FramePtr[0] = 0xFF; // R
+                FramePtr[1] = 0x00; // G
+                FramePtr[2] = 0x00; // B
+            } else if (h < (H_ACTIVE * 2) / 3) {
+                // Green bar
+                FramePtr[0] = 0x00; // R
+                FramePtr[1] = 0xFF; // G
+                FramePtr[2] = 0x00; // B
+            } else {
+                // Blue bar
+                FramePtr[0] = 0x00; // R
+                FramePtr[1] = 0x00; // G
+                FramePtr[2] = 0xFF; // B
+            }
+            FramePtr += 3;
+        }
+    }
+    // IMPORTANT: Flush the data cache after writing to the frame buffer.
+    // This ensures the VDMA sees the latest data in DDR memory.
+    Xil_DCacheFlushRange((UINTPTR)FrameBuffer, FRAME_SIZE);
+}
+
+/*****************************************************************************/
+/**
+* This function sets up the VDMA read channel (Memory-Mapped to Stream).
+******************************************************************************/
+static int SetupVdma(u16 DeviceId) {
+    XAxiVdma_Config *Config;
+    XAxiVdma_DmaSetup ReadCfg;
+    int Status;
+    u32 Addr;
+
+    Config = XAxiVdma_LookupConfig(DeviceId);
+    if (!Config) {
+        xil_printf("No VDMA found for ID %d\r\n", DeviceId);
+        return XST_FAILURE;
+    }
+
+    Status = XAxiVdma_CfgInitialize(&Vdma, Config, Config->BaseAddress);
+    if (Status != XST_SUCCESS) {
+        xil_printf("VDMA CfgInitialize failed: %d\r\n", Status);
+        return Status;
+    }
+
+    // --- Configure the Read Channel (MM2S) ---
+    ReadCfg.VertSizeInput      = V_ACTIVE;
+    ReadCfg.HoriSizeInput      = FRAME_STRIDE;
+    ReadCfg.Stride             = FRAME_STRIDE;
+    ReadCfg.FrameDelay         = 0;
+    ReadCfg.EnableCircularBuf  = 1; // Use circular buffer mode
+    ReadCfg.EnableSync         = 1; // Gen-Lock to AXI-Stream slave
+    ReadCfg.PointNum           = 0;
+    ReadCfg.EnableFrameCounter = 0;
+    ReadCfg.FixedFrameStoreAddr= 0;
+
+    Status = XAxiVdma_DmaConfig(&Vdma, XAXIVDMA_READ, &ReadCfg);
+    if (Status != XST_SUCCESS) {
+        xil_printf("VDMA DmaConfig failed: %d\r\n", Status);
+        return Status;
+    }
+
+    // --- Set the Frame Buffer Address ---
+    // We only use one frame buffer in this simple example.
+    Addr = (u32)FrameBuffer;
+    Status = XAxiVdma_DmaSetBufferAddr(&Vdma, XAXIVDMA_READ, &Addr);
+    if (Status != XST_SUCCESS) {
+        xil_printf("VDMA DmaSetBufferAddr failed: %d\r\n", Status);
+        return Status;
+    }
+
+    return XST_SUCCESS;
+}
+
+
+/*****************************************************************************/
+/**
+* This function initializes the HDMI output path by configuring the ADV7511
+* chip via the AXI IIC controller.
+******************************************************************************/
+static int SetupHdmi(u16 IicDeviceId) {
+    XIic_Config *Config;
+    int Status;
+
+    // Initialize IIC Driver
+    Config = XIic_LookupConfig(IicDeviceId);
+    if (Config == NULL) {
+        xil_printf("IIC device not found for ID %d\r\n", IicDeviceId);
+        return XST_FAILURE;
+    }
+
+    Status = XIic_CfgInitialize(&Iic, Config, Config->BaseAddress);
+    if (Status != XST_SUCCESS) {
+        xil_printf("IIC CfgInitialize failed: %d\r\n", Status);
+        return XST_FAILURE;
+    }
+
+    // Configure the ADV7511 HDMI Chip
+    ConfigureHdmi();
+
+    return XST_SUCCESS;
+}
+
+/*****************************************************************************/
+/**
+* This function sends the configuration sequence to the ADV7511 HDMI
+* transmitter chip over I2C to set it up for 1080p output.
+******************************************************************************/
+void ConfigureHdmi(void) {
+    u8 Buffer[2];
+
+    // Set the IIC slave address for the ADV7511
+    XIic_SetAddress(&Iic, XII_ADDR_TO_SEND_TYPE, IIC_ADV7511_ADDR);
+
+    // --- ADV7511 Configuration Sequence for 1080p ---
+    // This is a standard sequence.
+    Buffer[0] = 0x41; Buffer[1] = 0x10; XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0x98; Buffer[1] = 0x03; XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0x9A; Buffer[1] = 0xE0; XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0x9C; Buffer[1] = 0x30; XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0x9D; Buffer[1] = 0x61; XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0xA2; Buffer[1] = 0xA4; XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0xA3; Buffer[1] = 0xA4; XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0xAF; Buffer[1] = 0x06; XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0xBA; Buffer[1] = 0x60; XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0xDE; Buffer[1] = 0x9C; XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0xE0; Buffer[1] = 0xD0; XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0xF9; Buffer[1] = 0x00; XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0x15; Buffer[1] = 0x00; XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0x16; Buffer[1] = 0x38; XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0x18; Buffer[1] = 0x46; XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0x48; Buffer[1] = 0x08; XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0x41; Buffer[1] = 0x00; XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+}
+
+/*****************************************************************************/
+/**
+* This function is the callback for the VDMA's MM2S (Read) channel.
+* It is called when a frame has been completely transferred to the pipeline.
+******************************************************************************/
+static void ReadCallBack(void *CallbackRef, u32 Mask) {
+    // In this simple application, we don't need to do anything here.
+    // In a more complex design, you might use this to switch frame buffers
+    // for double or triple buffering.
+}
+
+/*****************************************************************************/
+/**
+* This is the error callback for the VDMA's MM2S (Read) channel.
+******************************************************************************/
+static void ReadErrorCallBack(void *CallbackRef, u32 Mask) {
+    xil_printf("!!! VDMA Read Error: Mask = 0x%08X\r\n", Mask);
+}
+
+/*****************************************************************************/
+/**
+* This function initializes the SCUGIC interrupt controller.
+******************************************************************************/
+static int SetupIntrController(XScuGic *IntcInstancePtr) {
+    int Status;
+    XScuGic_Config *IntcConfig;
+
+    IntcConfig = XScuGic_LookupConfig(INTC_ID);
+    if (NULL == IntcConfig) {
+        return XST_FAILURE;
+    }
+
+    Status = XScuGic_CfgInitialize(IntcInstancePtr, IntcConfig, IntcConfig->CpuBaseAddress);
+    if (Status != XST_SUCCESS) {
+        return XST_FAILURE;
+    }
+
+    // --- Set up exception handling ---
+    Xil_ExceptionInit();
+    Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_INT,
+                                 (Xil_ExceptionHandler)XScuGic_InterruptHandler,
+                                 (void *)IntcInstancePtr);
+    Xil_ExceptionEnable();
+
+    return XST_SUCCESS;
+}
+
+/*****************************************************************************/
+/**
+* This function sets up the interrupt system for the VDMA.
+******************************************************************************/
+static int SetupVideoIntrSystem(XAxiVdma *AxiVdmaPtr, u16 ReadIntrId, XScuGic *Intc) {
+    int Status;
+
+    // Connect the VDMA interrupt handler
+    Status = XScuGic_Connect(Intc, ReadIntrId,
+                             (Xil_InterruptHandler)XAxiVdma_ReadIntrHandler,
+                             (void *)AxiVdmaPtr);
+    if (Status != XST_SUCCESS) {
+        xil_printf("Failed to connect VDMA read interrupt: %d\r\n", Status);
+        return XST_FAILURE;
+    }
+
+    // Enable the VDMA interrupt
+    XScuGic_Enable(Intc, ReadIntrId);
+
+    // --- Register the callback functions ---
+    XAxiVdma_SetCallBack(AxiVdmaPtr, XAXIVDMA_HANDLER_GENERAL, ReadCallBack,
+                         (void *)AxiVdmaPtr, XAXIVDMA_READ);
+    XAxiVdma_SetCallBack(AxiVdmaPtr, XAXIVDMA_HANDLER_ERROR, ReadErrorCallBack,
+                         (void *)AxiVdmaPtr, XAXIVDMA_READ);
+
+    // Enable all interrupts on the VDMA read channel
+    XAxiVdma_IntrEnable(AxiVdmaPtr, XAXIVDMA_IXR_ALL_MASK, XAXIVDMA_READ);
+
+    return XST_SUCCESS;
+}

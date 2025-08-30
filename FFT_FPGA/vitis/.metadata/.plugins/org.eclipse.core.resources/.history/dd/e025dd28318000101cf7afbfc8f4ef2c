@@ -1,0 +1,453 @@
+/*
+ * vdma_hdmi.c
+ *
+ * Created on: Apr 9, 2020
+ * Author: VIPIN
+ * Modified for HDMI output with VPSS
+ */
+
+#include "xparameters.h"
+#include "xaxivdma.h"
+#include "xscugic.h"
+#include "sleep.h"
+#include <stdlib.h>
+#include "xil_cache.h"
+#include "xvtc.h"         // Video Timing Controller
+#include "xv_vpss.h"      // Video Processing Subsystem
+#include "xiic.h"         // IIC Controller
+#include "xil_printf.h"
+
+/************************** Constant Definitions *****************************/
+
+// IIC Address of the ADV7511 HDMI Transmitter
+#define IIC_ADV7511_ADDR 0x39
+
+// VDMA, VTC, and VPSS Device IDs from xparameters.h
+#define VDMA_ID   XPAR_AXI_VDMA_0_DEVICE_ID
+#define VTC_ID    XPAR_VTC_0_DEVICE_ID
+#define VPSS_ID   XPAR_XV_VPSS_0_DEVICE_ID
+#define IIC_ID    XPAR_AXI_IIC_0_DEVICE_ID
+#define INTC_ID   XPAR_SCUGIC_0_DEVICE_ID
+#define VDMA_MM2S_INTR_ID XPAR_FABRIC_AXI_VDMA_0_MM2S_INTROUT_INTR
+
+// Video Resolution
+#define H_ACTIVE  1920
+#define V_ACTIVE  1080
+
+// Frame buffer details
+#define FRAME_STRIDE  (H_ACTIVE * 3) // 3 bytes per pixel (RGB888)
+#define FRAME_SIZE    (FRAME_STRIDE * V_ACTIVE)
+
+/************************** Global Variables *********************************/
+
+// Driver Instances
+static XAxiVdma Vdma;
+static XScuGic  Intc;
+static XVtc     Vtc;
+static XV_vpss  Vpss;
+static XIic     Iic;
+
+// Frame buffer array
+// This is placed in DDR memory
+unsigned char FrameBuffer[FRAME_SIZE];
+
+/************************** Function Prototypes ******************************/
+
+// VDMA related functions
+static int  SetupIntrSystem(XAxiVdma *AxiVdmaPtr, u16 ReadIntrId);
+static void ReadCallBack(void *CallbackRef, u32 Mask);
+static void ReadErrorCallBack(void *CallbackRef, u32 Mask);
+static int  SetupVdma(u16 DeviceId);
+
+// HDMI and pipeline related functions
+static int  SetupVpss(u16 DeviceId);
+static int  SetupVtc(u16 DeviceId);
+static int  SetupHdmi(u16 DeviceId);
+void       ConfigureHdmi(void);
+
+// Utility function
+void       FillFrame(void);
+
+/*****************************************************************************/
+/**
+*
+* Main function
+*
+******************************************************************************/
+int main() {
+    int Status;
+
+    xil_printf("--- HDMI Output Test via VDMA and VPSS ---\r\n");
+
+    // 1. Initialize HDMI Output (IIC and VTC)
+    Status = SetupHdmi(IIC_ID);
+    if (Status != XST_SUCCESS) {
+        xil_printf("HDMI Initialization failed! Error: %d\r\n", Status);
+        return XST_FAILURE;
+    }
+    xil_printf("HDMI Initialized Successfully\r\n");
+
+    // 2. Initialize the Video Processing Subsystem (VPSS)
+    Status = SetupVpss(VPSS_ID);
+    if (Status != XST_SUCCESS) {
+        xil_printf("VPSS Initialization failed! Error: %d\r\n", Status);
+        return XST_FAILURE;
+    }
+    xil_printf("VPSS Initialized Successfully\r\n");
+
+    // 3. Initialize the VDMA
+    Status = SetupVdma(VDMA_ID);
+    if (Status != XST_SUCCESS) {
+        xil_printf("VDMA Initialization failed! Error: %d\r\n", Status);
+        return XST_FAILURE;
+    }
+    xil_printf("VDMA Initialized Successfully\r\n");
+
+    // 4. Setup the interrupt system
+    Status = SetupIntrSystem(&Vdma, VDMA_MM2S_INTR_ID);
+    if (Status != XST_SUCCESS) {
+        xil_printf("Interrupt system setup failed! Error: %d\r\n", Status);
+        return XST_FAILURE;
+    }
+    xil_printf("Interrupt System Setup Successfully\r\n");
+
+    // 5. Fill the frame buffer with a test pattern
+    FillFrame();
+    xil_printf("Frame Buffer Filled with test pattern\r\n");
+
+    // 6. Start the VDMA transfer
+    Status = XAxiVdma_DmaStart(&Vdma, XAXIVDMA_READ);
+    if (Status != XST_SUCCESS) {
+        xil_printf("VDMA start failed! Error: %d\r\n", Status);
+        return XST_FAILURE;
+    }
+    xil_printf("VDMA Started. Video output should be visible on HDMI monitor.\r\n");
+
+    // Infinite loop
+    while (1) {
+    }
+
+    return XST_SUCCESS;
+}
+
+
+/*****************************************************************************/
+/**
+* This function sets up the Video Processing Subsystem for color space
+* conversion from RGB to YCbCr 4:4:4.
+******************************************************************************/
+static int SetupVpss(u16 DeviceId) {
+    XV_vpss_Config *VpssConfig;
+    XVidC_VideoStream InStream, OutStream;
+    int Status;
+
+    VpssConfig = XV_vpss_LookupConfig(DeviceId);
+    if (VpssConfig == NULL) {
+        return XST_FAILURE;
+    }
+
+    Status = XV_vpss_CfgInitialize(&Vpss, VpssConfig, VpssConfig->BaseAddress);
+    if (Status != XST_SUCCESS) {
+        return XST_FAILURE;
+    }
+
+    // --- Configure Input Stream ---
+    InStream.VmId           = XVIDC_VM_1920x1080_60_P;
+    InStream.Timing.HActive = H_ACTIVE;
+    InStream.Timing.VActive = V_ACTIVE;
+    InStream.ColorFormatId  = XVIDC_CSF_RGB; // Input is RGB
+    InStream.ColorDepth     = VpssConfig->PixPerClkIn;
+    InStream.PixPerClk      = VpssConfig->PixPerClkIn;
+    InStream.IsInterlaced   = 0;
+    XV_vpss_SetVidStreamIn(&Vpss, &InStream);
+
+    // --- Configure Output Stream ---
+    OutStream.VmId           = XVIDC_VM_1920x1080_60_P;
+    OutStream.Timing.HActive = H_ACTIVE;
+    OutStream.Timing.VActive = V_ACTIVE;
+    OutStream.ColorFormatId  = XVIDC_CSF_YCRCB_444; // Output is YCbCr 4:4:4
+    OutStream.ColorDepth     = VpssConfig->PixPerClkOut;
+    OutStream.PixPerClk      = VpssConfig->PixPerClkOut;
+    OutStream.IsInterlaced   = 0;
+    XV_vpss_SetVidStreamOut(&Vpss, &OutStream);
+
+    // Start the VPSS
+    Status = XV_vpss_Start(&Vpss);
+    if (Status != XST_SUCCESS) {
+        return XST_FAILURE;
+    }
+
+    return XST_SUCCESS;
+}
+
+
+/*****************************************************************************/
+/**
+* This function sets up the VDMA read channel.
+******************************************************************************/
+static int SetupVdma(u16 DeviceId) {
+    XAxiVdma_Config *Config;
+    XAxiVdma_DmaSetup ReadCfg;
+    int Status;
+
+    Config = XAxiVdma_LookupConfig(DeviceId);
+    if (!Config) {
+        xil_printf("No VDMA found for ID %d\r\n", DeviceId);
+        return XST_FAILURE;
+    }
+
+    Status = XAxiVdma_CfgInitialize(&Vdma, Config, Config->BaseAddress);
+    if (Status != XST_SUCCESS) {
+        xil_printf("VDMA CfgInitialize failed %d\r\n", Status);
+        return Status;
+    }
+
+    // Configure the Read Channel (MM2S)
+    ReadCfg.VertSizeInput      = V_ACTIVE;
+    ReadCfg.HoriSizeInput      = FRAME_STRIDE;
+    ReadCfg.Stride             = FRAME_STRIDE;
+    ReadCfg.FrameDelay         = 0;
+    ReadCfg.EnableCircularBuf  = 1; // Use circular buffer mode
+    ReadCfg.EnableSync         = 1; // Gen-Lock to AXI-Stream
+    ReadCfg.PointNum           = 0;
+    ReadCfg.EnableFrameCounter = 0;
+    ReadCfg.FixedFrameStoreAddr= 0;
+
+    Status = XAxiVdma_DmaConfig(&Vdma, XAXIVDMA_READ, &ReadCfg);
+    if (Status != XST_SUCCESS) {
+        xil_printf("VDMA DmaConfig failed %d\r\n", Status);
+        return Status;
+    }
+
+    // Set the frame buffer address
+    // We are using only one buffer in this example
+    u32 FrameAddr[XAXIVDMA_MAX_FRAMES];
+    FrameAddr[0] = (u32)FrameBuffer;
+
+    Status = XAxiVdma_DmaSetBufferAddr(&Vdma, XAXIVDMA_READ, FrameAddr);
+    if (Status != XST_SUCCESS) {
+        xil_printf("VDMA DmaSetBufferAddr failed %d\r\n", Status);
+        return Status;
+    }
+
+    return XST_SUCCESS;
+}
+
+/*****************************************************************************/
+/**
+* This function fills the frame buffer with a 3-bar color pattern.
+* Red | Green | Blue
+******************************************************************************/
+void FillFrame(void) {
+    u32 v, h;
+    u8 *FramePtr = (u8 *)FrameBuffer;
+
+    for (v = 0; v < V_ACTIVE; v++) {
+        for (h = 0; h < H_ACTIVE; h++) {
+            if (h < H_ACTIVE / 3) {
+                // Red bar
+                FramePtr[0] = 0xFF; // R
+                FramePtr[1] = 0x00; // G
+                FramePtr[2] = 0x00; // B
+            } else if (h < (H_ACTIVE * 2) / 3) {
+                // Green bar
+                FramePtr[0] = 0x00; // R
+                FramePtr[1] = 0xFF; // G
+                FramePtr[2] = 0x00; // B
+            } else {
+                // Blue bar
+                FramePtr[0] = 0x00; // R
+                FramePtr[1] = 0x00; // G
+                FramePtr[2] = 0xFF; // B
+            }
+            FramePtr += 3;
+        }
+    }
+    // Flush the cache to ensure data is written to DDR
+    Xil_DCacheFlushRange((UINTPTR)FrameBuffer, FRAME_SIZE);
+}
+
+
+/*****************************************************************************/
+/**
+* This function sets up the Video Timing Controller (VTC).
+******************************************************************************/
+static int SetupVtc(u16 DeviceId) {
+    XVtc_Config *Config;
+    XVtc_Timing Timing;
+    int Status;
+
+    Config = XVtc_LookupConfig(DeviceId);
+    if (Config == NULL) {
+        return XST_FAILURE;
+    }
+
+    Status = XVtc_CfgInitialize(&Vtc, Config, Config->BaseAddress);
+    if (Status != XST_SUCCESS) {
+        return XST_FAILURE;
+    }
+
+    // --- Configure VTC for 1080p timing ---
+    Timing.HActiveVideo   = 1920;
+    Timing.HFrontPorch    = 88;
+    Timing.HSyncWidth     = 44;
+    Timing.HBackPorch     = 148;
+    Timing.HSyncPolarity  = 1;
+    Timing.VActiveVideo   = 1080;
+    Timing.VFrontPorch    = 4;
+    Timing.VSyncWidth     = 5;
+    Timing.VBackPorch     = 36;
+    Timing.VSyncPolarity  = 1;
+
+    XVtc_SetGeneratorTiming(&Vtc, &Timing);
+    XVtc_Enable(&Vtc);
+    XVtc_EnableGenerator(&Vtc);
+
+    return XST_SUCCESS;
+}
+
+/*****************************************************************************/
+/**
+* This function initializes the HDMI output path which includes the
+* IIC controller and the VTC.
+******************************************************************************/
+static int SetupHdmi(u16 IicDeviceId) {
+    XIic_Config *Config;
+    int Status;
+
+    // --- Initialize IIC Driver ---
+    Config = XIic_LookupConfig(IicDeviceId);
+    if (Config == NULL) {
+        return XST_FAILURE;
+    }
+
+    Status = XIic_CfgInitialize(&Iic, Config, Config->BaseAddress);
+    if (Status != XST_SUCCESS) {
+        return XST_FAILURE;
+    }
+
+    // --- Initialize VTC ---
+    Status = SetupVtc(VTC_ID);
+    if (Status != XST_SUCCESS) {
+        return XST_FAILURE;
+    }
+
+    // --- Configure ADV7511 HDMI Chip via IIC ---
+    ConfigureHdmi();
+
+    return XST_SUCCESS;
+}
+
+/*****************************************************************************/
+/**
+* This function sends the configuration sequence to the ADV7511 HDMI
+* transmitter chip over I2C.
+******************************************************************************/
+void ConfigureHdmi(void) {
+    u8 Buffer[2];
+
+    // Set the IIC slave address
+    XIic_SetAddress(&Iic, XII_ADDR_TO_SEND_TYPE, IIC_ADV7511_ADDR);
+
+    // --- ADV7511 Configuration Sequence ---
+    // This sequence is standard for setting up the ADV7511 for 1080p
+    Buffer[0] = 0x41; Buffer[1] = 0x10; // Power down control
+    XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0x98; Buffer[1] = 0x03; // ADI recommended write
+    XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0x9A; Buffer[1] = 0xE0; // ADI recommended write
+    XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0x9C; Buffer[1] = 0x30; // ADI recommended write
+    XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0x9D; Buffer[1] = 0x61; // ADI recommended write
+    XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0xA2; Buffer[1] = 0xA4; // ADI recommended write
+    XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0xA3; Buffer[1] = 0xA4; // ADI recommended write
+    XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0xAF; Buffer[1] = 0x06; // HDMI/DVI mode select
+    XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0xBA; Buffer[1] = 0x60; // ADI recommended write
+    XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0xDE; Buffer[1] = 0x9C; // ADI recommended write
+    XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0xE0; Buffer[1] = 0xD0; // ADI recommended write
+    XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0xF9; Buffer[1] = 0x00; // ADI recommended write
+    XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+
+    // --- Input Video Format ---
+    Buffer[0] = 0x15; Buffer[1] = 0x00; // Input video format: RGB 24-bit
+    XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0x16; Buffer[1] = 0x38; // 4:4:4, 8-bit, style 1
+    XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+
+    // --- Output Video Format ---
+    Buffer[0] = 0x18; Buffer[1] = 0x46; // CSC disabled, RGB out
+    XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+    Buffer[0] = 0x48; Buffer[1] = 0x08; // Right justify video data
+    XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+
+    // Power up
+    Buffer[0] = 0x41; Buffer[1] = 0x00; // Power up
+    XIic_Send(Iic.BaseAddress, IIC_ADV7511_ADDR, Buffer, 2, XIIC_STOP);
+}
+
+
+/*****************************************************************************/
+/* Call back function for read channel
+******************************************************************************/
+static void ReadCallBack(void *CallbackRef, u32 Mask) {
+    // This function is called when a frame transfer is complete.
+    // In a more complex application, you might swap buffers here.
+}
+
+/*****************************************************************************/
+/* Call back function for read error
+******************************************************************************/
+static void ReadErrorCallBack(void *CallbackRef, u32 Mask) {
+    xil_printf("!!! Read Error callback function is called\r\n");
+}
+
+/*****************************************************************************/
+/**
+* This function sets up the interrupt system for the VDMA.
+******************************************************************************/
+static int SetupIntrSystem(XAxiVdma *AxiVdmaPtr, u16 ReadIntrId) {
+    int Status;
+    XScuGic_Config *IntcConfig;
+
+    IntcConfig = XScuGic_LookupConfig(INTC_ID);
+    Status = XScuGic_CfgInitialize(&Intc, IntcConfig, IntcConfig->CpuBaseAddress);
+    if (Status != XST_SUCCESS) {
+        xil_printf("Interrupt controller initialization failed..");
+        return XST_FAILURE;
+    }
+
+    Status = XScuGic_Connect(&Intc, ReadIntrId,
+                             (Xil_InterruptHandler)XAxiVdma_ReadIntrHandler,
+                             (void *)AxiVdmaPtr);
+    if (Status != XST_SUCCESS) {
+        xil_printf("Failed read channel connect intc %d\r\n", Status);
+        return XST_FAILURE;
+    }
+
+    XScuGic_Enable(&Intc, ReadIntrId);
+
+    Xil_ExceptionInit();
+    Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_INT,
+                                 (Xil_ExceptionHandler)XScuGic_InterruptHandler,
+                                 (void *)&Intc);
+    Xil_ExceptionEnable();
+
+    // Register callback functions
+    XAxiVdma_SetCallBack(AxiVdmaPtr, XAXIVDMA_HANDLER_GENERAL, ReadCallBack,
+                         (void *)AxiVdmaPtr, XAXIVDMA_READ);
+    XAxiVdma_SetCallBack(AxiVdmaPtr, XAXIVDMA_HANDLER_ERROR, ReadErrorCallBack,
+                         (void *)AxiVdmaPtr, XAXIVDMA_READ);
+
+    // Enable VDMA interrupts
+    XAxiVdma_IntrEnable(AxiVdmaPtr, XAXIVDMA_IXR_ALL_MASK, XAXIVDMA_READ);
+
+    return XST_SUCCESS;
+}

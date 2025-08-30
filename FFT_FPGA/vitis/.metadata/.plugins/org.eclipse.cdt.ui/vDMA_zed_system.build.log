@@ -1,0 +1,16 @@
+10:50:59 **** Incremental Build of configuration Debug for project vDMA_zed_system ****
+make all 
+Generating bif file for the system project
+generate_system_bif.bat 51335 C:/Vivado_Projects/FFT_FPGA/vitis/FFT_sw/export/FFT_sw/FFT_sw.xpfm standalone_domain C:/Vivado_Projects/FFT_FPGA/vitis/vDMA_zed_system/Debug/system.bif
+'\gnu\microblaze\lin\bin\' is not recognized as an internal or external command,
+operable program or batch file.
+'\gnu\microblaze\nt\bin\' is not recognized as an internal or external command,
+operable program or batch file.
+'\gnuwin\bin\' is not recognized as an internal or external command,
+operable program or batch file.
+sdcard_gen --xpfm C:/Vivado_Projects/FFT_FPGA/vitis/FFT_sw/export/FFT_sw/FFT_sw.xpfm --sys_config FFT_sw --bif C:/Vivado_Projects/FFT_FPGA/vitis/vDMA_zed_system/Debug/system.bif --bitstream C:/Vivado_Projects/FFT_FPGA/vitis/vDMA_zed/_ide/bitstream/design_2_wrapper.bit --elf C:/Vivado_Projects/FFT_FPGA/vitis/vDMA_zed/Debug/vDMA_zed.elf,ps7_cortexa9_0
+creating BOOT.BIN using C:/Vivado_Projects/FFT_FPGA/vitis/vDMA_zed/_ide/bitstream/design_2_wrapper.bit
+Running C:/Xilinx/Vitis/2024.1/bin/bootgen  -image C:/Vivado_Projects/FFT_FPGA/vitis/vDMA_zed_system/Debug/sd_card_temp/boot.bif -w -o i BOOT.BIN
+
+10:51:05 Build Finished (took 6s.213ms)
+

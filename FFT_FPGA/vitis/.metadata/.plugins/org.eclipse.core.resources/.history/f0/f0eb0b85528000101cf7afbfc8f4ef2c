@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="ASCII"?>
+<sdkproject:SdkProject xmi:version="2.0" xmlns:xmi="http://www.omg.org/XMI" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:sdkproject="http://www.xilinx.com/sdkproject" name="vDMA_zed" location="C:/Vivado_Projects/FFT_FPGA/vitis/vDMA_zed" platform="C:/Vivado_Projects/FFT_FPGA/vitis/FFT_sw/export/FFT_sw/FFT_sw.xpfm" platformUID="xilinx:nexys4_ddr::0.0(custom)" systemProject="vDMA_zed_system" sysConfig="FFT_sw" runtime="C/C++" cpu="standalone_domain" cpuInstance="ps7_cortexa9_0" os="standalone" mssSignature="6939cc07df28725fc05313a997f2645e">
+  <configuration name="Debug" id="xilinx.gnu.armv7.exe.debug.1995040014" dirty="true">
+    <configBuildOptions xsi:type="sdkproject:SdkOptions"/>
+    <lastBuildOptions xsi:type="sdkproject:SdkOptions"/>
+  </configuration>
+  <configuration name="Release" id="xilinx.gnu.armv7.exe.release.1202251616" dirty="true">
+    <configBuildOptions xsi:type="sdkproject:SdkOptions"/>
+  </configuration>
+  <template appTemplateName="empty_application"/>
+</sdkproject:SdkProject>

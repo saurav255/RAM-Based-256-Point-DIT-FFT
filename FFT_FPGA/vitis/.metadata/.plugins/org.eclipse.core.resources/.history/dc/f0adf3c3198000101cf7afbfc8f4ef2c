@@ -1,0 +1,291 @@
+/*
+ * vdmaTest.c
+ *
+ *  Created on: Apr 9, 2020
+ *      Author: VIPIN
+ */
+#include "xparameters.h"
+#include "xaxivdma.h"
+#include "xscugic.h"
+#include "sleep.h"
+#include <stdlib.h>
+#include "xil_cache.h"
+#include "xil_cache.h"
+/* VPSS includes */
+#include "xvprocss.h"
+#include "xvidc.h"
+
+#define HSize 1920
+#define VSize 1080
+#define FrameSize HSize*VSize*3
+
+static XScuGic Intc;
+/* VPSS instance (new) */
+static XVprocSs Vpss;
+
+static int SetupIntrSystem(XAxiVdma *AxiVdmaPtr, u16 ReadIntrId);
+
+static int SetupVprocSs(void);   /* new helper to init VPSS */
+
+unsigned char Buffer[FrameSize];
+
+int main(){
+	int status;
+    /* --- VPSS setup: initialize and configure color-space conversion --- */
+//       status = SetupVprocSs();
+//       if (status != XST_SUCCESS) {
+//           xil_printf("VPSS setup failed\r\n");
+//           return XST_FAILURE;
+//       }
+//       xil_printf("VPSS configured OK\r\n");
+       /* ------------------------------------------------------------------ */
+
+
+	int Index;
+	u32 Addr;
+	XAxiVdma myVDMA;
+	XAxiVdma_Config *config = XAxiVdma_LookupConfig(XPAR_AXI_VDMA_0_DEVICE_ID);
+	XAxiVdma_DmaSetup ReadCfg;
+	status = XAxiVdma_CfgInitialize(&myVDMA, config, config->BaseAddress);
+    if(status != XST_SUCCESS){
+    	xil_printf("DMA Initialization failed");
+    }
+
+    ReadCfg.VertSizeInput = VSize;
+    ReadCfg.HoriSizeInput = HSize*3;
+    ReadCfg.Stride = HSize*3;
+    ReadCfg.FrameDelay = 0;
+    ReadCfg.EnableCircularBuf = 1;
+    ReadCfg.EnableSync = 1;
+    ReadCfg.PointNum = 0;
+    ReadCfg.EnableFrameCounter = 0;
+    ReadCfg.FixedFrameStoreAddr = 0;
+    status = XAxiVdma_DmaConfig(&myVDMA, XAXIVDMA_READ, &ReadCfg);
+    if (status != XST_SUCCESS) {
+    	xil_printf("Write channel config failed %d\r\n", status);
+    	return status;
+    }
+
+    Addr = (u32)&(Buffer[0]);
+
+
+	for(Index = 0; Index < myVDMA.MaxNumFrames; Index++) {
+		ReadCfg.FrameStoreStartAddr[Index] = Addr;
+		Addr +=  FrameSize;
+	}
+
+	status = XAxiVdma_DmaSetBufferAddr(&myVDMA, XAXIVDMA_READ,ReadCfg.FrameStoreStartAddr);
+	if (status != XST_SUCCESS) {
+		xil_printf("Read channel set buffer address failed %d\r\n", status);
+		return XST_FAILURE;
+	}
+
+	XAxiVdma_IntrEnable(&myVDMA, XAXIVDMA_IXR_COMPLETION_MASK, XAXIVDMA_READ);
+
+	SetupIntrSystem(&myVDMA, XPAR_FABRIC_AXI_VDMA_0_MM2S_INTROUT_INTR);
+
+	//Fill the data
+	for(int i=0;i<VSize;i++){
+		for(int j=0;j<HSize*3;j=j+3){
+			if(j>=0 && j<640*3){
+				Buffer[(i*HSize*3)+j] = 0xff;
+			    Buffer[(i*HSize*3)+j+1] = 0x00;
+			    Buffer[(i*HSize*3)+j+2] = 0x00;
+			}
+			else if(j>=640*3 && j<1280*3){
+				Buffer[(i*HSize*3)+j]   = 0x00;
+			    Buffer[(i*HSize*3)+j+1] = 0xff;
+			    Buffer[(i*HSize*3)+j+2] = 0x00;
+			}
+			else {
+				Buffer[(i*HSize*3)+j]   = 0x00;
+			    Buffer[(i*HSize*3)+j+1] = 0x00;
+			    Buffer[(i*HSize*3)+j+2] = 0xff;
+			}
+		}
+	}
+
+	Xil_DCacheFlush();
+
+	status = XAxiVdma_DmaStart(&myVDMA,XAXIVDMA_READ);
+	if (status != XST_SUCCESS) {
+		if(status == XST_VDMA_MISMATCH_ERROR)
+			xil_printf("DMA Mismatch Error\r\n");
+		return XST_FAILURE;
+	}
+
+    while(1){
+    }
+}
+
+
+int SetupVprocSs(void)
+{
+    int status;
+    XVprocSs_Config *CfgPtr;
+    XVidC_VideoStream inStrm, outStrm;
+    u32 ba;
+    int i;
+
+    xil_printf("DEBUG: Entering SetupVprocSs()\r\n");
+
+    /* 1) Lookup config */
+#ifdef XPAR_V_PROC_SS_0_DEVICE_ID
+    CfgPtr = XVprocSs_LookupConfig(XPAR_V_PROC_SS_0_DEVICE_ID);
+#else
+    xil_printf("ERROR: XPAR_V_PROC_SS_0_DEVICE_ID not defined in xparameters.h\r\n");
+    return XST_FAILURE;
+#endif
+
+    if (!CfgPtr) {
+        xil_printf("ERROR: XVprocSs_LookupConfig returned NULL\r\n");
+        return XST_FAILURE;
+    }
+
+    xil_printf("DEBUG: Found VPSS config struct at %p\n", CfgPtr);
+    xil_printf("DEBUG: VPSS baseaddr = 0x%08x, HighAddr = 0x%08x\r\n",
+               (unsigned)CfgPtr->BaseAddress, (unsigned)CfgPtr->HighAddress);
+    xil_printf("DEBUG: VPSS DeviceId = %d, Topology=%d, PixPerClock=%d, MaxW=%d MaxH=%d\r\n",
+               CfgPtr->DeviceId, CfgPtr->Topology, CfgPtr->PixPerClock, CfgPtr->MaxWidth, CfgPtr->MaxHeight);
+
+    /* 2) Try initialize driver */
+    status = XVprocSs_CfgInitialize(&Vpss, CfgPtr, CfgPtr->BaseAddress);
+    xil_printf("DEBUG: XVprocSs_CfgInitialize returned %d (IsReady=%d)\r\n", status, (int)Vpss.IsReady);
+    if (status != XST_SUCCESS) return status;
+
+    /* Basic AXI-lite probe: read first 0x40 bytes of VPSS space */
+    ba = (u32) CfgPtr->BaseAddress;
+    xil_printf("DEBUG: Probing VPSS registers at base 0x%08x\r\n", ba);
+    for (i = 0; i < 0x40; i += 4) {
+        u32 r = Xil_In32(ba + i);
+        xil_printf("  [0x%02x] = 0x%08x\r\n", i, r);
+    }
+
+    /* Check for obvious non-respond (0xFFFFFFFF often means no device / bus fault) */
+    if (Xil_In32(ba) == 0xFFFFFFFF) {
+        xil_printf("ERROR: VPSS bus read returned 0xFFFFFFFF — PL not programmed or s_axi_ctrl not connected?\r\n");
+        return XST_FAILURE;
+    }
+
+    /* 3) Prepare streams with direct struct assignment (avoid macro collisions) */
+    memset(&inStrm, 0, sizeof(inStrm));
+    inStrm.ColorFormatId = XVIDC_CSF_RGB;
+    inStrm.ColorDepth = 8;
+    status = XVprocSs_SetStreamResolution(&inStrm, XVIDC_VM_1920x1080_60_P, NULL);
+    xil_printf("DEBUG: SetStreamResolution(in) returned %d\r\n", status);
+    if (status != XST_SUCCESS) { xil_printf("ERROR: in stream resolution not supported\r\n"); return status; }
+
+    memset(&outStrm, 0, sizeof(outStrm));
+    outStrm.ColorFormatId = XVIDC_CSF_YCRCB_444;
+    outStrm.ColorDepth = 8;
+    status = XVprocSs_SetStreamResolution(&outStrm, XVIDC_VM_1920x1080_60_P, NULL);
+    xil_printf("DEBUG: SetStreamResolution(out) returned %d\r\n", status);
+    if (status != XST_SUCCESS) { xil_printf("ERROR: out stream resolution not supported\r\n"); return status; }
+
+    /* 4) Install stream descriptors into driver */
+    status = XVprocSs_SetVidStreamIn(&Vpss, &inStrm);
+    xil_printf("DEBUG: XVprocSs_SetVidStreamIn returned %d\r\n", status);
+    if (status != XST_SUCCESS) { xil_printf("ERROR: SetVidStreamIn failed\r\n"); return status; }
+
+    status = XVprocSs_SetVidStreamOut(&Vpss, &outStrm);
+    xil_printf("DEBUG: XVprocSs_SetVidStreamOut returned %d\r\n", status);
+    if (status != XST_SUCCESS) { xil_printf("ERROR: SetVidStreamOut failed\r\n"); return status; }
+
+    /* Print the driver side stored values */
+    xil_printf("DEBUG: Driver stored PixPerClock=%d ColorDepth=%d Topology=%d\r\n",
+               Vpss.Config.PixPerClock, Vpss.Config.ColorDepth, Vpss.Config.Topology);
+    xil_printf("DEBUG: Driver VidIn WxH = %d x %d, VidOut WxH = %d x %d\r\n",
+               Vpss.CtxtData.VidInWidth, Vpss.CtxtData.VidInHeight,
+               Vpss.Config.MaxWidth, Vpss.Config.MaxHeight);
+
+    /* 5) Apply configuration (this is the call that actually programs sub-cores) */
+    status = XVprocSs_SetSubsystemConfig(&Vpss);
+    xil_printf("DEBUG: XVprocSs_SetSubsystemConfig returned %d\r\n", status);
+    if (status != XST_SUCCESS) {
+        /* print more info */
+        XVprocSs_ReportSubsystemConfig(&Vpss);
+        XVprocSs_ReportSubcoreStatus(&Vpss, XVPROCSS_SUBCORE_CSC);
+        return status;
+    }
+
+    /* Call reporting helpers to print what was actually configured */
+    XVprocSs_ReportSubsystemConfig(&Vpss);
+    XVprocSs_ReportSubcoreStatus(&Vpss, XVPROCSS_SUBCORE_CSC);
+
+    /* 6) Start */
+    XVprocSs_Start(&Vpss);
+    xil_printf("DEBUG: XVprocSs_Start done\r\n");
+
+    return XST_SUCCESS;
+}
+
+/*****************************************************************************/
+ /* Call back function for read channel
+******************************************************************************/
+
+static void ReadCallBack(void *CallbackRef, u32 Mask)
+{
+	static int i=0;
+	/* User can add his code in this call back function */
+	xil_printf("Read Call back function is called\r\n");
+	if(i==0){
+		memset(Buffer,0x00,FrameSize);
+		i=1;
+	}
+	else{
+		memset(Buffer,0xff,FrameSize);
+		i=0;
+	}
+	Xil_DCacheFlush();
+	sleep(1);
+}
+
+/*****************************************************************************/
+/*
+ * The user can put his code that should get executed when this
+ * call back happens.
+ *
+*
+******************************************************************************/
+static void ReadErrorCallBack(void *CallbackRef, u32 Mask)
+{
+	/* User can add his code in this call back function */
+	xil_printf("Read Call back Error function is called\r\n");
+
+}
+
+
+static int SetupIntrSystem(XAxiVdma *AxiVdmaPtr, u16 ReadIntrId)
+{
+	int Status;
+	XScuGic *IntcInstancePtr =&Intc;
+
+	/* Initialize the interrupt controller and connect the ISRs */
+	XScuGic_Config *IntcConfig;
+	IntcConfig = XScuGic_LookupConfig(XPAR_PS7_SCUGIC_0_DEVICE_ID);
+	Status =  XScuGic_CfgInitialize(IntcInstancePtr, IntcConfig, IntcConfig->CpuBaseAddress);
+	if(Status != XST_SUCCESS){
+		xil_printf("Interrupt controller initialization failed..");
+		return -1;
+	}
+
+	Status = XScuGic_Connect(IntcInstancePtr,ReadIntrId,(Xil_InterruptHandler)XAxiVdma_ReadIntrHandler,(void *)AxiVdmaPtr);
+	if (Status != XST_SUCCESS) {
+		xil_printf("Failed read channel connect intc %d\r\n", Status);
+		return XST_FAILURE;
+	}
+
+	XScuGic_Enable(IntcInstancePtr,ReadIntrId);
+
+	Xil_ExceptionInit();
+	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_INT,(Xil_ExceptionHandler)XScuGic_InterruptHandler,(void *)IntcInstancePtr);
+	Xil_ExceptionEnable();
+
+	/* Register call-back functions
+	 */
+	XAxiVdma_SetCallBack(AxiVdmaPtr, XAXIVDMA_HANDLER_GENERAL, ReadCallBack, (void *)AxiVdmaPtr, XAXIVDMA_READ);
+
+	XAxiVdma_SetCallBack(AxiVdmaPtr, XAXIVDMA_HANDLER_ERROR, ReadErrorCallBack, (void *)AxiVdmaPtr, XAXIVDMA_READ);
+
+	return XST_SUCCESS;
+}

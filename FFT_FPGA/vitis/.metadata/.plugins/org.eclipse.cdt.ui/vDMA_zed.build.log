@@ -1,0 +1,33 @@
+10:50:57 **** Incremental Build of configuration Debug for project vDMA_zed ****
+make all 
+make --no-print-directory pre-build
+a9-linaro-pre-build-step
+' '
+make --no-print-directory main-build
+'Building file: ../src/Zed_hdmi.c'
+'Invoking: ARM v7 gcc compiler'
+arm-none-eabi-gcc -Wall -O0 -g3 -c -fmessage-length=0 -MT"src/Zed_hdmi.o" -mcpu=cortex-a9 -mfpu=vfpv3 -mfloat-abi=hard -IC:/Vivado_Projects/FFT_FPGA/vitis/FFT_sw/export/FFT_sw/sw/FFT_sw/standalone_domain/bspinclude/include -MMD -MP -MF"src/Zed_hdmi.d" -MT"src/Zed_hdmi.o" -o "src/Zed_hdmi.o" "../src/Zed_hdmi.c"
+../src/Zed_hdmi.c: In function 'main':
+../src/Zed_hdmi.c:52:13: warning: unused variable 'choice' [-Wunused-variable]
+   52 |         int choice;
+      |             ^~~~~~
+../src/Zed_hdmi.c: At top level:
+../src/Zed_hdmi.c:38:17: warning: 'VpssInst' defined but not used [-Wunused-variable]
+   38 | static XVprocSs VpssInst;
+      |                 ^~~~~~~~
+'Finished building: ../src/Zed_hdmi.c'
+' '
+'Building target: vDMA_zed.elf'
+'Invoking: ARM v7 gcc linker'
+arm-none-eabi-gcc -mcpu=cortex-a9 -mfpu=vfpv3 -mfloat-abi=hard -Wl,-build-id=none -specs=Xilinx.spec -Wl,-T -Wl,../src/lscript.ld -LC:/Vivado_Projects/FFT_FPGA/vitis/FFT_sw/export/FFT_sw/sw/FFT_sw/standalone_domain/bsplib/lib -o "vDMA_zed.elf"  ./src/Zed_hdmi.o ./src/zed_iic_axi.o   -Wl,--start-group,-lxil,-lgcc,-lc,--end-group
+'Finished building target: vDMA_zed.elf'
+' '
+'Invoking: ARM v7 Print Size'
+arm-none-eabi-size vDMA_zed.elf  |tee "vDMA_zed.elf.size"
+   text	   data	    bss	    dec	    hex	filename
+ 175103	 264344	39928016	40367463	267f567	vDMA_zed.elf
+'Finished building: vDMA_zed.elf.size'
+' '
+
+10:50:58 Build Finished (took 1s.331ms)
+

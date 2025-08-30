@@ -1,0 +1,8 @@
+0.7
+2020.2
+May 22 2024
+19:03:11
+C:/Vivado_Projects/FFT_VER3/FFT_VER3.sim/sim_1/behav/xsim/glbl.v,1708598507,verilog,,,,glbl,,,,,,,,
+C:/Vivado_Projects/FFT_VER3/FFT_VER3.srcs/sim_1/imports/new/tb_fft.v,1755456399,verilog,,,,fft_tb;fifo_ram;sample_ram;twiddle_rom_256,,,,,,,,
+C:/Vivado_Projects/FFT_VER3/FFT_VER3.srcs/sources_1/imports/new/fft_ver2.v,1755441327,verilog,,C:/Vivado_Projects/FFT_VER3/FFT_VER3.srcs/sources_1/imports/new/unit.v,,fft_ver2,,,,,,,,
+C:/Vivado_Projects/FFT_VER3/FFT_VER3.srcs/sources_1/imports/new/unit.v,1755441419,verilog,,C:/Vivado_Projects/FFT_VER3/FFT_VER3.srcs/sim_1/imports/new/tb_fft.v,,unit,,,,,,,,
